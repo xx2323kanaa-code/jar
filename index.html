@@ -56,11 +56,24 @@ details{margin-top:6px;}
 </div>
 
 <script>
-/* ===== 基本要素 ===== */
+/* ===== (1) DOM参照：ここだけ追加（必須）===== */
+const startBtn = document.getElementById("startBtn");
+const cameraSel = document.getElementById("cameraSel");
+const hudBtn = document.getElementById("hudBtn");
+const csvBtn = document.getElementById("csvBtn");
+
+const side = document.getElementById("side");
+const leftCountSpan = document.getElementById("leftCount");
+const rightCountSpan = document.getElementById("rightCount");
+
+const logInfo = document.getElementById("logInfo");
+const hud = document.getElementById("hud");
+
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
+/* ===== 基本要素 ===== */
 let model, stream=null, running=false;
 let currentSide="LEFT", leftCount=0, rightCount=0;
 let phase="BACK";
@@ -102,18 +115,24 @@ function stopCamera(){
 
 /* ===== 足サイズ ===== */
 function getFootSize(person){
-  return person.bbox[3]*0.33;
+  return person.bbox[3]*0.33; // 元のまま
 }
 
 /* ===== メイン検出 ===== */
 async function detect(){
   if(!running) return;
+
   const preds = await model.detect(video);
   ctx.clearRect(0,0,canvas.width,canvas.height);
 
-  const person = preds.find(p=>p.class==="person");
-  if(person){
-    const size=getFootSize(person);
+  /* ===== (2) personが取れないときのフォールバック：ここだけ変更 ===== */
+  // person があればそれを使う。なければ「最大面積bbox」を使う。
+  const target =
+    preds.find(p=>p.class==="person") ||
+    (preds.length ? preds.slice().sort((a,b)=> (b.bbox[2]*b.bbox[3]) - (a.bbox[2]*a.bbox[3]))[0] : null);
+
+  if(target){
+    const size = getFootSize(target);
 
     minSize=Math.min(minSize,size);
     maxSize=Math.max(maxSize,size);
@@ -136,7 +155,9 @@ async function detect(){
 
     if(hudOn){
       hud.innerHTML=
-        `bboxH:${person.bbox[3].toFixed(1)}<br>`+
+        `preds:${preds.length}<br>`+
+        `target:${target.class} score:${(target.score??0).toFixed(2)}<br>`+
+        `bboxH:${target.bbox[3].toFixed(1)}<br>`+
         `min:${minSize.toFixed(1)} max:${maxSize.toFixed(1)}<br>`+
         `phase:${phase}`;
     }
