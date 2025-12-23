@@ -2,78 +2,79 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>FOOTSTEP-ALT | Ankle Exercise Counter (Human-in-the-Loop)</title>
+<title>FOOTSTEP-ALT v1.0</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
 
 <style>
-html,body{
-  margin:0; padding:0; overflow:hidden;
-  background:#000; color:#fff; font-family:sans-serif;
-}
-video,canvas{
-  position:absolute; top:0; left:0;
-  width:100%; height:100%; object-fit:cover;
-}
-#titleBar{
-  position:fixed; top:0; left:0; right:0;
-  background:rgba(0,0,0,0.7);
-  padding:8px; text-align:center;
+html,body{margin:0;padding:0;overflow:hidden;background:#000;color:#fff;font-family:sans-serif;}
+video,canvas{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;}
+#topBar{
+  position:fixed;top:0;left:0;right:0;
+  background:rgba(0,0,0,.75);padding:6px;text-align:center;
 }
 #panel{
-  position:fixed; bottom:0; left:0; right:0;
-  background:rgba(0,0,0,0.75);
-  padding:10px;
+  position:fixed;bottom:0;left:0;right:0;
+  background:rgba(0,0,0,.85);padding:8px;
 }
-button{
-  font-size:16px; padding:6px 12px; margin:4px;
-}
-#hud{
-  font-size:12px; opacity:0.85;
-  display:none;
-}
+button,select{font-size:14px;margin:2px;}
+details{margin-top:6px;}
+#hud{font-size:12px;opacity:.8;}
 </style>
 </head>
 
 <body>
 
-<div id="titleBar">
+<div id="topBar">
   <b>FOOTSTEP-ALT</b><br>
-  <small>Human-in-the-Loop Ankle Exercise Counter</small>
+  <small>Human-in-the-Loop Ankle Exercise Logger</small>
 </div>
 
 <video id="video" playsinline muted></video>
 <canvas id="canvas"></canvas>
 
 <div id="panel">
-  <button id="startBtn">▶ カメラ開始</button>
+  <button id="startBtn">▶ 開始</button>
+  <select id="cameraSel">
+    <option value="environment">背面</option>
+    <option value="user">前面</option>
+  </select>
   <button id="hudBtn">HUD</button><br>
+
   足：<span id="side">LEFT</span>　
   左：<span id="leftCount">0</span>　
   右：<span id="rightCount">0</span>
-  <div id="hud"></div>
+
+  <details>
+    <summary>ログ / CSV</summary>
+    <div id="logInfo"></div>
+    <button id="csvBtn">CSV出力</button>
+    <div id="hud" style="display:none"></div>
+  </details>
 </div>
 
 <script>
+/* ===== 基本要素 ===== */
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
-let model;
-let running = false;
+let model, stream=null, running=false;
+let currentSide="LEFT", leftCount=0, rightCount=0;
+let phase="BACK";
+let lastSize=null, minSize=Infinity, maxSize=0;
+let hudOn=false;
 
-let lastSize = null;
-let phase = "BACK";
-let currentSide = "LEFT";
-let leftCount = 0;
-let rightCount = 0;
-let hudOn = false;
+/* ===== 時刻・ログ ===== */
+let sessionStart=null, sessionEnd=null;
+const STORAGE_KEY="FOOTSTEP_ALT_LOGS";
 
+/* ===== カメラ制御 ===== */
 async function startCamera(){
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video:{facingMode:"environment"}
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:cameraSel.value}
   });
   video.srcObject = stream;
   await video.play();
@@ -83,62 +84,125 @@ async function startCamera(){
 
   model = await cocoSsd.load();
   running = true;
+  sessionStart = new Date();
+  startBtn.textContent="■ 停止";
   detect();
 }
 
-function getFootSize(person){
-  const [x,y,w,h] = person.bbox;
-  return h * 0.33; // 下1/3を足とみなす
+function stopCamera(){
+  running=false;
+  sessionEnd = new Date();
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream=null;
+  }
+  startBtn.textContent="▶ 開始";
+  saveSession();
 }
 
+/* ===== 足サイズ ===== */
+function getFootSize(person){
+  return person.bbox[3]*0.33;
+}
+
+/* ===== メイン検出 ===== */
 async function detect(){
   if(!running) return;
-
   const preds = await model.detect(video);
   ctx.clearRect(0,0,canvas.width,canvas.height);
 
   const person = preds.find(p=>p.class==="person");
   if(person){
-    const size = getFootSize(person);
+    const size=getFootSize(person);
 
-    if(lastSize !== null){
-      if(phase==="BACK" && size > lastSize * 1.15){
+    minSize=Math.min(minSize,size);
+    maxSize=Math.max(maxSize,size);
+    const range=maxSize-minSize;
+
+    if(range>20){
+      const frontTh=minSize+range*0.6;
+      const backTh =minSize+range*0.4;
+
+      if(phase==="BACK" && size>frontTh){
         phase="FRONT";
       }
-      else if(phase==="FRONT" && size < lastSize * 0.9){
+      else if(phase==="FRONT" && size<backTh){
         phase="BACK";
-        if(currentSide==="LEFT"){
-          leftCount++; currentSide="RIGHT";
-        }else{
-          rightCount++; currentSide="LEFT";
-        }
+        if(currentSide==="LEFT"){leftCount++;currentSide="RIGHT";}
+        else{rightCount++;currentSide="LEFT";}
+        minSize=size; maxSize=size;
       }
     }
-    lastSize = size;
 
     if(hudOn){
-      document.getElementById("hud").innerHTML =
+      hud.innerHTML=
         `bboxH:${person.bbox[3].toFixed(1)}<br>`+
-        `footSize:${size.toFixed(1)}<br>`+
+        `min:${minSize.toFixed(1)} max:${maxSize.toFixed(1)}<br>`+
         `phase:${phase}`;
     }
   }
 
-  document.getElementById("side").textContent = currentSide;
-  document.getElementById("leftCount").textContent = leftCount;
-  document.getElementById("rightCount").textContent = rightCount;
+  side.textContent=currentSide;
+  leftCountSpan.textContent=leftCount;
+  rightCountSpan.textContent=rightCount;
 
   requestAnimationFrame(detect);
 }
 
-document.getElementById("startBtn").onclick = ()=>{
-  if(!running) startCamera();
-};
+/* ===== 保存 ===== */
+function saveSession(){
+  if(!sessionStart||!sessionEnd) return;
+  const total=leftCount+rightCount;
+  const minutes=(sessionEnd-sessionStart)/60000;
+  const speed=minutes>0?(total/minutes):0;
 
-document.getElementById("hudBtn").onclick = ()=>{
-  hudOn = !hudOn;
-  document.getElementById("hud").style.display = hudOn ? "block" : "none";
-};
+  const record={
+    date:sessionStart.toISOString().slice(0,10),
+    start:sessionStart.toLocaleTimeString(),
+    end:sessionEnd.toLocaleTimeString(),
+    total, speed:speed.toFixed(2)
+  };
+
+  let logs=JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");
+  logs.push(record);
+
+  // 最大7日分
+  const cutoff=new Date();
+  cutoff.setDate(cutoff.getDate()-6);
+  logs=logs.filter(l=>new Date(l.date)>=cutoff);
+
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(logs));
+  renderLogs();
+}
+
+/* ===== CSV ===== */
+function exportCSV(){
+  const logs=JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");
+  let csv="date,start,end,total,avg_per_min\n";
+  logs.forEach(l=>{
+    csv+=`${l.date},${l.start},${l.end},${l.total},${l.speed}\n`;
+  });
+  const blob=new Blob([csv],{type:"text/csv"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="footstep_alt.csv";
+  a.click();
+}
+
+/* ===== 表示 ===== */
+function renderLogs(){
+  const logs=JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");
+  logInfo.innerHTML=logs.map(l=>
+    `${l.date} ${l.start}-${l.end} 合計:${l.total} 平均:${l.speed}/分`
+  ).join("<br>");
+}
+
+/* ===== UI ===== */
+startBtn.onclick=()=>{running?stopCamera():startCamera();};
+hudBtn.onclick=()=>{hudOn=!hudOn;hud.style.display=hudOn?"block":"none";};
+csvBtn.onclick=exportCSV;
+
+renderLogs();
 </script>
 
 </body>
